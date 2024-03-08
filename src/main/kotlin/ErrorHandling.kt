@@ -1,5 +1,8 @@
 package org.example
 
+import arrow.core.computations.ensureNotNull
+import arrow.core.computations.nullable
+
 object ErrorHandling {
     data class Job(val id: JobId, val company: Company, val role: Role, val salary: Salary)
 
@@ -27,7 +30,7 @@ object ErrorHandling {
     )
 
     interface Jobs {
-        fun findById(jobId: JobId): Job
+        fun findById(id: JobId): Job?
     }
 
     class NaiveJobs : Jobs {
@@ -36,27 +39,70 @@ object ErrorHandling {
         }
     }
 
-    class JobsService(private val jobs: Jobs) {
-        fun retrieveSalary(jobId: JobId): Double {
-            val job = jobs.findById(jobId)
-            return try {
-                job.salary.value
-            } catch (e: Exception) {
-                0.0
-            }
+    class LiveJobs : Jobs {
+        override fun findById(id: JobId) = try {
+            JOBS_DATABASE.getValue(id)
+        } catch (e: Exception) {
+            null
         }
     }
-    // referential transparency: a function is referentially transparent if it can be replaced with its value without changing the program's behavior
-    // functions that throw exceptions are NOT RT
-    // we want the compiler to warn us of potential errors
-    // "checked" exceptions don't work well with FP because higher order functions
+
+    class JobsService(private val jobs: Jobs, private val converter: CurrencyConverter) {
+        fun retrieveSalary(jobId: JobId): Double {
+            return jobs.findById(jobId)?.salary?.value ?: 0.0
+        }
+
+        // This function calls CurrencyConverter when job is not null
+        fun retrieveSalaryEur(id: JobId): Double =
+            jobs.findById(id)?.let {
+                converter.usd2Eur(it.salary.value)
+            } ?: 0.0
+
+        // Another example with takeIf construct
+        fun isFromCompany(id: JobId, company: String): Boolean =
+            jobs.findById(id)?.takeIf { it.company.name == company } != null
+
+        // This method shows how nesting lets can create unreadable code. Can be solved with Arrow
+        fun sumSalaries(jobId1: JobId, jobId2: JobId): Double? {
+            val maybeJob1: Job? = jobs.findById(jobId1)
+            val maybeJob2: Job? = jobs.findById(jobId2)
+            return maybeJob1?.let { job1 ->
+                maybeJob2?.let { job2 ->
+                    job1.salary.value + job2.salary.value
+                }
+            }
+        }
+
+        // Same method using arrow. The evaluation of the code will stop as soon as a null value is found
+        fun sunSalaries_V2(jobId1: JobId, jobId2: JobId): Double? = nullable.eager {
+            println("Searchoing for job $jobId1")
+            val job1: Job = jobs.findById(jobId1).bind()
+            println("Job 1 found: $job1")
+            println("Searching for job $jobId2")
+            // you can also use ensureNotNull
+            val job2: Job = jobs.findById(jobId2).bind()
+            println("Job 2 found: $job2")
+            job1.salary.value + job2.salary.value
+        }
+    }
+
+
+    // This class will show how to handle nullable types
+    class CurrencyConverter {
+        fun usd2Eur(amount: Double): Double = amount * 0.91
+    }
+
 
     @JvmStatic
     fun main(args: Array<String>) {
-        val jobs: Jobs = NaiveJobs()
-        val jobsService = JobsService(jobs)
-        val jobId = 42
-        val salary = jobsService.retrieveSalary(JobId(jobId.toString()))
-        println("Salary for job $jobId is $salary")
+        val jobs: Jobs = LiveJobs()
+        val converter = CurrencyConverter()
+        val jobsService = JobsService(jobs, converter)
+        val jobId = 1
+        val isAppleJob = jobsService.isFromCompany(JobId(jobId.toString()), "Apple")
+        println("Job is $jobId ${if (isAppleJob) "is" else "is not"} from Apple")
+        // In the logs you will see that "Job 2 found" log is not printed because is not executed
+        val sumSalaries = jobsService.sunSalaries_V2(JobId("1"), JobId("42")) ?: 0.0
+        println("sum of salaries of jobs: $sumSalaries")
     }
 }
